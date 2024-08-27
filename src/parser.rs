@@ -1,7 +1,7 @@
 use std::iter::{Iterator, Peekable};
-use std::str::CharIndices;
-use std::num::ParseIntError;
 use std::num::ParseFloatError;
+use std::num::ParseIntError;
+use std::str::CharIndices;
 use std::str::FromStr;
 
 #[derive(Debug, PartialEq)]
@@ -9,7 +9,7 @@ enum Token<'a> {
     SimpleString(&'a str),
     Error(&'a str),
     Integer(i64),
-    BulkString(Option<Vec<&'a str>>),
+    BulkString(Option<&'a str>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -58,13 +58,14 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn next_if<F>(&mut self, condition: F) -> Option<(usize, char)> where F: FnOnce(&(usize, char)) -> bool {
-        self.scanner
-            .next_if(condition)
-            .map(|c| {
-                self.position += 1;
-                c
-            })
+    fn next_if<F>(&mut self, condition: F) -> Option<(usize, char)>
+    where
+        F: FnOnce(&(usize, char)) -> bool,
+    {
+        self.scanner.next_if(condition).map(|c| {
+            self.position = c.0 + 1;
+            c
+        })
     }
 
     fn scan_string<F>(&mut self, condition: F) -> Option<&'a str>
@@ -76,8 +77,12 @@ impl<'a> Lexer<'a> {
         while let Some((position, _)) = self.scanner.next_if(condition) {
             end_position = position;
         }
-        let text = self.inner.get(start_position..=end_position)?;
-        self.position = end_position + 1;
+        let text = if start_position < end_position {
+            self.position = end_position + 1;
+            self.inner.get(start_position..=end_position)?
+        } else {
+            ""
+        };
         Some(text)
     }
 
@@ -131,23 +136,21 @@ impl<'a> Lexer<'a> {
             i64::from_str(text)
         };
 
-        match (count_result) {
+        match count_result {
             Ok(count) => {
                 if count >= 0 {
                     let count = count as usize;
-                    let mut list = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        let text = self.scan_string(|(_, c)| *c != '\r' && *c != '\n')?;
-                        self.skip_line()?;
-                        list.push(text);
-                    }
-
-                    Some(Ok(Token::BulkString(Some(list))))
+                    let end_position = self.position + count;
+                    let text = self.scan_string(|(position, c)| {
+                        *position < end_position && *c != '\r' && *c != '\n'
+                    })?;
+                    self.skip_line()?;
+                    Some(Ok(Token::BulkString(Some(text))))
                 } else {
                     Some(Ok(Token::BulkString(None)))
                 }
             }
-            Err(e) => Some(Err(Error::I64(e)))
+            Err(e) => Some(Err(Error::I64(e))),
         }
     }
 }
@@ -185,10 +188,7 @@ impl<'a> Parser<'a> {
 }
 
 mod tests {
-    use super::{
-        Lexer,
-        Token,
-    };
+    use super::{Lexer, Token};
 
     #[test]
     fn test_simple_string() {
@@ -208,14 +208,20 @@ mod tests {
     #[test]
     fn test_error() {
         let mut lexer = Lexer::new("-ERR unknown command 'FOO'\r\n");
-        assert_eq!(lexer.next().unwrap(), Ok(Token::Error("ERR unknown command 'FOO'")));
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Error("ERR unknown command 'FOO'"))
+        );
         assert_eq!(lexer.next(), None);
     }
 
     #[test]
     fn test_error_2() {
         let mut lexer = Lexer::new("-ERR unknown command 'FOO'\r\n-10086\r\n");
-        assert_eq!(lexer.next().unwrap(), Ok(Token::Error("ERR unknown command 'FOO'")));
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Error("ERR unknown command 'FOO'"))
+        );
         assert_eq!(lexer.next().unwrap(), Ok(Token::Error("10086")));
         assert_eq!(lexer.next(), None);
     }
@@ -238,6 +244,27 @@ mod tests {
         let mut lexer = Lexer::new(":1000\r\n:-1000\r\n");
         assert_eq!(lexer.next().unwrap(), Ok(Token::Integer(1000)));
         assert_eq!(lexer.next().unwrap(), Ok(Token::Integer(-1000)));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_bulk_string() {
+        let mut lexer = Lexer::new("$5\r\nhello\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::BulkString(Some("hello"))));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_bulk_string_2() {
+        let mut lexer = Lexer::new("$0\r\n\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::BulkString(Some(""))));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_bulk_string_3() {
+        let mut lexer = Lexer::new("$-1\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::BulkString(None)));
         assert_eq!(lexer.next(), None);
     }
 }

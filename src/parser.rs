@@ -10,6 +10,7 @@ enum Token<'a> {
     Error(&'a str),
     Integer(i64),
     BulkString(Option<&'a str>),
+    Array(Vec<Token<'a>>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -86,6 +87,12 @@ impl<'a> Lexer<'a> {
         Some(text)
     }
 
+    fn get_symbol_position(&mut self) -> usize {
+        self.next_if(|(_, c)| *c == '+' || *c == '-')
+            .unwrap_or((self.position, '+'))
+            .0
+    }
+
     fn scan_number(&mut self) -> (usize, usize) {
         let start_position = self.position;
         let mut end_position = self.position;
@@ -93,6 +100,13 @@ impl<'a> Lexer<'a> {
             end_position = position;
         }
         (start_position, end_position)
+    }
+
+    fn get_integer(&mut self) -> Option<ParseResult<i64>> {
+        let symbol_position = self.get_symbol_position();
+        let (_, end_position) = self.scan_number();
+        let text = self.inner.get(symbol_position..=end_position)?;
+        Some(i64::from_str(text).map_err(Error::I64))
     }
 
     fn scan_simple_string(&mut self) -> Option<ParseResult<Token<'a>>> {
@@ -111,30 +125,15 @@ impl<'a> Lexer<'a> {
 
     fn scan_integer(&mut self) -> Option<ParseResult<Token<'a>>> {
         self.next_if(|(_, c)| *c == ':')?;
-        let symbol_position = {
-            self.next_if(|(_, c)| *c == '+' || *c == '-')
-                .unwrap_or((self.position, '+'))
-                .0
-        };
-        let (_, end_position) = self.scan_number();
-        let text = self.inner.get(symbol_position..=end_position)?;
+        let result = self.get_integer()?;
         self.skip_line()?;
-        Some(i64::from_str(text).map(Token::Integer).map_err(Error::I64))
+        Some(result.map(Token::Integer))
     }
 
     fn scan_bulk_string(&mut self) -> Option<ParseResult<Token<'a>>> {
         self.next_if(|(_, c)| *c == '$')?;
-        let symbol_position = {
-            self.next_if(|(_, c)| *c == '+' || *c == '-')
-                .unwrap_or((self.position, '+'))
-                .0
-        };
-        let (_, end_position) = self.scan_number();
+        let count_result = self.get_integer()?;
         self.skip_line()?;
-        let count_result = {
-            let text = self.inner.get(symbol_position..=end_position)?;
-            i64::from_str(text)
-        };
 
         match count_result {
             Ok(count) => {
@@ -150,7 +149,28 @@ impl<'a> Lexer<'a> {
                     Some(Ok(Token::BulkString(None)))
                 }
             }
-            Err(e) => Some(Err(Error::I64(e))),
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn scan_array(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.next_if(|(_, c)| *c == '*')?;
+        let count_result = self.get_integer()?;
+        self.skip_line()?;
+
+        match count_result {
+            Err(e) => Some(Err(e)),
+            Ok(count) => {
+                let count = count as usize;
+                let mut arr = Vec::with_capacity(count);
+                for _ in 0..count {
+                    match self.next()? {
+                        Ok(token) => arr.push(token),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                Some(Ok(Token::Array(arr)))
+            }
         }
     }
 }
@@ -164,6 +184,7 @@ impl<'a> Iterator for Lexer<'a> {
             (_, '-') => self.scan_error(),
             (_, ':') => self.scan_integer(),
             (_, '$') => self.scan_bulk_string(),
+            (_, '*') => self.scan_array(),
             _ => {
                 todo!()
             }
@@ -265,6 +286,56 @@ mod tests {
     fn test_bulk_string_3() {
         let mut lexer = Lexer::new("$-1\r\n");
         assert_eq!(lexer.next().unwrap(), Ok(Token::BulkString(None)));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_array() {
+        let mut lexer = Lexer::new("*0\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Array(vec![])));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_array_2() {
+        let mut lexer = Lexer::new("*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n");
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Array(vec![
+                Token::BulkString(Some("foo")),
+                Token::BulkString(Some("bar")),
+            ]))
+        );
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_array_3() {
+        let mut lexer = Lexer::new("*3\r\n:1\r\n:2\r\n:3\r\n");
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Array(vec![
+                Token::Integer(1),
+                Token::Integer(2),
+                Token::Integer(3),
+            ]))
+        );
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_array_4() {
+        let mut lexer = Lexer::new("*5\r\n:1\r\n:2\r\n:3\r\n:4\r\n$6\r\nfoobar\r\n");
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Array(vec![
+                Token::Integer(1),
+                Token::Integer(2),
+                Token::Integer(3),
+                Token::Integer(4),
+                Token::BulkString(Some("foobar")),
+            ]))
+        );
         assert_eq!(lexer.next(), None);
     }
 }

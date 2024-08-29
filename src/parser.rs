@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::iter::{Iterator, Peekable};
 use std::num::ParseFloatError;
 use std::num::ParseIntError;
@@ -10,13 +11,18 @@ enum Token<'a> {
     Error(&'a str),
     Integer(i64),
     BulkString(Option<&'a str>),
-    Array(Vec<Token<'a>>),
+    Array(Option<Vec<Token<'a>>>),
+
+    Boolean(bool),
+    Double(f64),
+    BigNumber(&'a str),
 }
 
 #[derive(Debug, PartialEq)]
 enum Error {
     I64(ParseIntError),
     F64(ParseFloatError),
+    Boolean,
 }
 
 impl From<ParseIntError> for Error {
@@ -109,6 +115,34 @@ impl<'a> Lexer<'a> {
         Some(i64::from_str(text).map_err(Error::I64))
     }
 
+    fn get_collections<F>(
+        &mut self,
+        count_result: ParseResult<i64>,
+        mut call_back: F,
+    ) -> Option<ParseResult<i64>>
+    where
+        F: FnMut(Token<'a>),
+    {
+        match count_result {
+            Err(e) => Some(Err(e)),
+            Ok(count) => {
+                if count >= 0 {
+                    let tmp_count = count as usize;
+                    for _ in 0..tmp_count {
+                        match self.next()? {
+                            Ok(token) => call_back(token),
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    Some(Ok(count))
+                } else {
+                    self.skip_line()?;
+                    Some(Ok(count))
+                }
+            }
+        }
+    }
+
     fn scan_simple_string(&mut self) -> Option<ParseResult<Token<'a>>> {
         self.next_if(|(_, c)| *c == '+')?;
         let text = self.scan_string(|(_, c)| *c != '\r' && *c != '\n')?;
@@ -158,33 +192,71 @@ impl<'a> Lexer<'a> {
         let count_result = self.get_integer()?;
         self.skip_line()?;
 
-        match count_result {
-            Err(e) => Some(Err(e)),
-            Ok(count) => {
-                let count = count as usize;
-                let mut arr = Vec::with_capacity(count);
-                for _ in 0..count {
-                    match self.next()? {
-                        Ok(token) => arr.push(token),
-                        Err(e) => return Some(Err(e)),
-                    }
-                }
-                Some(Ok(Token::Array(arr)))
-            }
+        let mut list = Vec::new();
+        match self.get_collections(count_result, |token| list.push(token)) {
+            None => None,
+            Some(Ok(count)) if count >= 0 => Some(Ok(Token::Array(Some(list)))),
+            Some(Ok(_)) => Some(Ok(Token::Array(None))),
+            Some(Err(e)) => Some(Err(e)),
         }
     }
+
+    fn scan_boolean(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.next_if(|(_, c)| *c == '#')?;
+        let token = {
+            match self.next_if(|(_, c)| *c == 't' || *c == 'f')? {
+                (_, 't') => Token::Boolean(true),
+                (_, 'f') => Token::Boolean(false),
+                _ => return Some(Err(Error::Boolean)),
+            }
+        };
+        self.skip_line()?;
+        Some(Ok(token))
+    }
+
+    // fn scan_set(&mut self) -> Option<ParseResult<Token<'a>>> {
+    //     self.next_if(|(_, c)| *c == '#')?;
+    //     let count_result = self.get_integer()?;
+    //     self.skip_line()?;
+
+    //     let mut set = HashSet::new();
+    //     match self.get_collections(count_result, |token| {set.insert(token);}) {
+    //         None => None,
+    //         Some(Ok(count)) if count >= 0 => Some(Ok(Token::Set(Some(set)))),
+    //         Some(Ok(_)) => Some(Ok(Token::Set(None))),
+    //         Some(Err(e)) => Some(Err(e)),
+    //     }
+    // }
 }
 
 impl<'a> Iterator for Lexer<'a> {
     type Item = ParseResult<Token<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // switch (parser->curr_location[0]) {
+        //     case '$': return parseBulk(parser, p_ctx);
+        //     case '+': return parseSimpleString(parser, p_ctx);
+        //     case '-': return parseError(parser, p_ctx);
+        //     case ':': return parseLong(parser, p_ctx);
+        //     case '*': return parseArray(parser, p_ctx);
+        //     case '~': return parseSet(parser, p_ctx);
+        //     case '%': return parseMap(parser, p_ctx);
+        //     case '#': return parseBool(parser, p_ctx);
+        //     case ',': return parseDouble(parser, p_ctx);
+        //     case '_': return parseNull(parser, p_ctx);
+        //     case '(': return parseBigNumber(parser, p_ctx);
+        //     case '=': return parseVerbatimString(parser, p_ctx);
+        //     case '|': return parseAttributes(parser, p_ctx);
+        //     default: if (parser->callbacks.error) parser->callbacks.error(p_ctx);
+        // }
         match self.scanner.peek()? {
             (_, '+') => self.scan_simple_string(),
             (_, '-') => self.scan_error(),
             (_, ':') => self.scan_integer(),
             (_, '$') => self.scan_bulk_string(),
             (_, '*') => self.scan_array(),
+            // (_, '~') => self.scan_set(),
+            (_, '#') => self.scan_boolean(),
             _ => {
                 todo!()
             }
@@ -292,7 +364,7 @@ mod tests {
     #[test]
     fn test_array() {
         let mut lexer = Lexer::new("*0\r\n");
-        assert_eq!(lexer.next().unwrap(), Ok(Token::Array(vec![])));
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Array(Some(vec![]))));
         assert_eq!(lexer.next(), None);
     }
 
@@ -301,10 +373,10 @@ mod tests {
         let mut lexer = Lexer::new("*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n");
         assert_eq!(
             lexer.next().unwrap(),
-            Ok(Token::Array(vec![
+            Ok(Token::Array(Some(vec![
                 Token::BulkString(Some("foo")),
                 Token::BulkString(Some("bar")),
-            ]))
+            ])))
         );
         assert_eq!(lexer.next(), None);
     }
@@ -314,11 +386,11 @@ mod tests {
         let mut lexer = Lexer::new("*3\r\n:1\r\n:2\r\n:3\r\n");
         assert_eq!(
             lexer.next().unwrap(),
-            Ok(Token::Array(vec![
+            Ok(Token::Array(Some(vec![
                 Token::Integer(1),
                 Token::Integer(2),
                 Token::Integer(3),
-            ]))
+            ])))
         );
         assert_eq!(lexer.next(), None);
     }
@@ -328,14 +400,21 @@ mod tests {
         let mut lexer = Lexer::new("*5\r\n:1\r\n:2\r\n:3\r\n:4\r\n$6\r\nfoobar\r\n");
         assert_eq!(
             lexer.next().unwrap(),
-            Ok(Token::Array(vec![
+            Ok(Token::Array(Some(vec![
                 Token::Integer(1),
                 Token::Integer(2),
                 Token::Integer(3),
                 Token::Integer(4),
                 Token::BulkString(Some("foobar")),
-            ]))
+            ])))
         );
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_array_5() {
+        let mut lexer = Lexer::new("*-1\r\n\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Array(None)));
         assert_eq!(lexer.next(), None);
     }
 }

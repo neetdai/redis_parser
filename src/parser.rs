@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::iter::{Iterator, Peekable};
 use std::num::ParseFloatError;
 use std::num::ParseIntError;
@@ -12,9 +11,9 @@ enum Token<'a> {
     Integer(i64),
     BulkString(Option<&'a str>),
     Array(Option<Vec<Token<'a>>>),
-
     Boolean(bool),
-    Double(f64),
+    Set(Option<Vec<Token<'a>>>),
+    Double(&'a str),
     BigNumber(&'a str),
 }
 
@@ -214,19 +213,37 @@ impl<'a> Lexer<'a> {
         Some(Ok(token))
     }
 
-    // fn scan_set(&mut self) -> Option<ParseResult<Token<'a>>> {
-    //     self.next_if(|(_, c)| *c == '#')?;
-    //     let count_result = self.get_integer()?;
-    //     self.skip_line()?;
+    fn scan_set(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.next_if(|(_, c)| *c == '#')?;
+        let count_result = self.get_integer()?;
+        self.skip_line()?;
 
-    //     let mut set = HashSet::new();
-    //     match self.get_collections(count_result, |token| {set.insert(token);}) {
-    //         None => None,
-    //         Some(Ok(count)) if count >= 0 => Some(Ok(Token::Set(Some(set)))),
-    //         Some(Ok(_)) => Some(Ok(Token::Set(None))),
-    //         Some(Err(e)) => Some(Err(e)),
-    //     }
-    // }
+        let mut set = Vec::new();
+        match self.get_collections(count_result, |token| {set.push(token);}) {
+            None => None,
+            Some(Ok(count)) if count >= 0 => Some(Ok(Token::Set(Some(set)))),
+            Some(Ok(_)) => Some(Ok(Token::Set(None))),
+            Some(Err(e)) => Some(Err(e)),
+        }
+    }
+
+    fn scan_double(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.next_if(|(_, c)| *c ==',')?;
+        let start_position = self.get_symbol_position();
+        let (_, end_position) = self.scan_number();
+        
+        match self.next_if(|(_, c)| *c == '.') {
+            Some(_) => {
+                let (end_position, _) = self.scan_number();
+                let text = self.inner.get(start_position..=end_position)?;
+                Some(Ok(Token::Double(text)))
+            }
+            None => {
+                let text = self.inner.get(start_position..=end_position)?;
+                Some(Ok(Token::Double(text)))
+            },
+        }
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -255,7 +272,8 @@ impl<'a> Iterator for Lexer<'a> {
             (_, ':') => self.scan_integer(),
             (_, '$') => self.scan_bulk_string(),
             (_, '*') => self.scan_array(),
-            // (_, '~') => self.scan_set(),
+            (_, '~') => self.scan_set(),
+            (_, ',') => self.scan_double(),
             (_, '#') => self.scan_boolean(),
             _ => {
                 todo!()

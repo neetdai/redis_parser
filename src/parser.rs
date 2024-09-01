@@ -219,7 +219,9 @@ impl<'a> Lexer<'a> {
         self.skip_line()?;
 
         let mut set = Vec::new();
-        match self.get_collections(count_result, |token| {set.push(token);}) {
+        match self.get_collections(count_result, |token| {
+            set.push(token);
+        }) {
             None => None,
             Some(Ok(count)) if count >= 0 => Some(Ok(Token::Set(Some(set)))),
             Some(Ok(_)) => Some(Ok(Token::Set(None))),
@@ -228,21 +230,25 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_double(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c ==',')?;
+        self.next_if(|(_, c)| *c == ',')?;
         let start_position = self.get_symbol_position();
-        let (_, end_position) = self.scan_number();
-        
-        match self.next_if(|(_, c)| *c == '.') {
-            Some(_) => {
-                let (end_position, _) = self.scan_number();
-                let text = self.inner.get(start_position..=end_position)?;
-                Some(Ok(Token::Double(text)))
-            }
-            None => {
-                let text = self.inner.get(start_position..=end_position)?;
-                Some(Ok(Token::Double(text)))
-            },
+        let mut end_position = start_position;
+        let (_, position) = self.scan_number();
+        end_position = position;
+
+        if self.next_if(|(_, c)| *c == '.').is_some() {
+            let (_, position) = self.scan_number();
+            end_position = position;
         }
+
+        if self.next_if(|(_, c)| *c == 'e' || *c == 'E').is_some() {
+            self.get_symbol_position();
+            let (_, position) = self.scan_number();
+            end_position = position;
+        }
+        let text = self.inner.get(start_position..=end_position)?;
+        self.skip_line()?;
+        Some(Ok(Token::Double(text)))
     }
 }
 
@@ -433,6 +439,24 @@ mod tests {
     fn test_array_5() {
         let mut lexer = Lexer::new("*-1\r\n\r\n");
         assert_eq!(lexer.next().unwrap(), Ok(Token::Array(None)));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_boolean() {
+        let mut lexer = Lexer::new("#t\r\n#f\r\n#\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Boolean(true)));
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Boolean(false)));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_double() {
+        let mut lexer = Lexer::new(",3.14\r\n,-3.14\r\n,5.9e3\r\n,2\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Double("3.14")));
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Double("-3.14")));
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Double("5.9e3")));
+        assert_eq!(lexer.next().unwrap(), Ok(Token::Double("2")));
         assert_eq!(lexer.next(), None);
     }
 }

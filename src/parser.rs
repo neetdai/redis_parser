@@ -15,6 +15,8 @@ enum Token<'a> {
     Set(Option<Vec<Token<'a>>>),
     Double(&'a str),
     BigNumber(&'a str),
+    BigErr(&'a str),
+    VerbatimString(&'a str, &'a str),
 }
 
 #[derive(Debug, PartialEq)]
@@ -250,6 +252,39 @@ impl<'a> Lexer<'a> {
         self.skip_line()?;
         Some(Ok(Token::Double(text)))
     }
+
+    fn scan_big_number(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.next_if(|(_, c)| *c == '(')?;
+        let start_position = self.get_symbol_position();
+        let (_, end_position) = self.scan_number();
+        let text = self.inner.get(start_position..=end_position)?;
+        self.skip_line()?;
+        Some(Ok(Token::BigNumber(text)))
+    }
+
+    fn scan_big_error(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.next_if(|(_, c)| *c == '!')?;
+        let text = self.scan_string(|(_, c)| *c != '\r' && *c != '\n')?;
+        self.skip_line()?;
+        Some(Ok(Token::BigErr(text)))
+    }
+
+    fn scan_verbatim_string(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.next_if(|(_, c)| *c == '=')?;
+        let len = self.get_integer()?;
+        self.skip_line()?;
+
+        let len = len.ok()? as usize;
+
+        let start_position = self.position;
+        dbg!(&start_position);
+        let formatter = self.scan_string(|(position, _)| *position < start_position + 3)?;
+        self.next_if(|(_, c)| *c == ':')?;
+        let text = self.scan_string(|(position, _)| *position < len + start_position)?;
+        self.skip_line()?;
+
+        Some(Ok(Token::VerbatimString(formatter, text)))
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -281,6 +316,9 @@ impl<'a> Iterator for Lexer<'a> {
             (_, '~') => self.scan_set(),
             (_, ',') => self.scan_double(),
             (_, '#') => self.scan_boolean(),
+            (_, '(') => self.scan_big_number(),
+            (_, '!') => self.scan_big_error(),
+            (_, '=') => self.scan_verbatim_string(),
             _ => {
                 todo!()
             }
@@ -457,6 +495,32 @@ mod tests {
         assert_eq!(lexer.next().unwrap(), Ok(Token::Double("-3.14")));
         assert_eq!(lexer.next().unwrap(), Ok(Token::Double("5.9e3")));
         assert_eq!(lexer.next().unwrap(), Ok(Token::Double("2")));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_big_number() {
+        let mut lexer = Lexer::new("(123\r\n(-123\r\n(+123\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::BigNumber("123")));
+        assert_eq!(lexer.next().unwrap(), Ok(Token::BigNumber("-123")));
+        assert_eq!(lexer.next().unwrap(), Ok(Token::BigNumber("+123")));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_big_error() {
+        let mut lexer = Lexer::new("!OK\r\n");
+        assert_eq!(lexer.next().unwrap(), Ok(Token::BigErr("OK")));
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_verbatim_string() {
+        let mut lexer = Lexer::new("=15\r\ntxt:Some string\r\n");
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::VerbatimString("txt", "Some string"))
+        );
         assert_eq!(lexer.next(), None);
     }
 }

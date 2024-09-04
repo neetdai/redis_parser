@@ -17,6 +17,7 @@ enum Token<'a> {
     BigNumber(&'a str),
     BigErr(&'a str),
     VerbatimString(&'a str, &'a str),
+    Map(Option<Vec<Token<'a>>>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -64,6 +65,10 @@ impl<'a> Lexer<'a> {
         } else {
             None
         }
+    }
+
+    fn scan_token(&mut self, target_char: char) -> Option<(usize, char)> {
+        self.next_if(|(_, c)| *c == target_char)
     }
 
     fn next_if<F>(&mut self, condition: F) -> Option<(usize, char)>
@@ -145,28 +150,28 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_simple_string(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '+')?;
+        self.scan_token('+')?;
         let text = self.scan_string(|(_, c)| *c != '\r' && *c != '\n')?;
         self.skip_line()?;
         Some(Ok(Token::SimpleString(text)))
     }
 
     fn scan_error(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '-')?;
+        self.scan_token('-')?;
         let text = self.scan_string(|(_, c)| *c != '\r' && *c != '\n')?;
         self.skip_line()?;
         Some(Ok(Token::Error(text)))
     }
 
     fn scan_integer(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == ':')?;
+        self.scan_token(':')?;
         let result = self.get_integer()?;
         self.skip_line()?;
         Some(result.map(Token::Integer))
     }
 
     fn scan_bulk_string(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '$')?;
+        self.scan_token('$')?;
         let count_result = self.get_integer()?;
         self.skip_line()?;
 
@@ -189,7 +194,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_array(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '*')?;
+        self.scan_token('*')?;
         let count_result = self.get_integer()?;
         self.skip_line()?;
 
@@ -203,7 +208,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_boolean(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '#')?;
+        self.scan_token('#')?;
         let token = {
             match self.next_if(|(_, c)| *c == 't' || *c == 'f')? {
                 (_, 't') => Token::Boolean(true),
@@ -216,7 +221,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_set(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '#')?;
+        self.scan_token('~')?;
         let count_result = self.get_integer()?;
         self.skip_line()?;
 
@@ -232,7 +237,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_double(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == ',')?;
+        self.scan_token(',')?;
         let start_position = self.get_symbol_position();
         let mut end_position = start_position;
         let (_, position) = self.scan_number();
@@ -254,7 +259,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_big_number(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '(')?;
+        self.scan_token('(')?;
         let start_position = self.get_symbol_position();
         let (_, end_position) = self.scan_number();
         let text = self.inner.get(start_position..=end_position)?;
@@ -263,14 +268,14 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_big_error(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '!')?;
+        self.scan_token('!')?;
         let text = self.scan_string(|(_, c)| *c != '\r' && *c != '\n')?;
         self.skip_line()?;
         Some(Ok(Token::BigErr(text)))
     }
 
     fn scan_verbatim_string(&mut self) -> Option<ParseResult<Token<'a>>> {
-        self.next_if(|(_, c)| *c == '=')?;
+        self.scan_token('=')?;
         let len = self.get_integer()?;
         self.skip_line()?;
 
@@ -284,6 +289,23 @@ impl<'a> Lexer<'a> {
         self.skip_line()?;
 
         Some(Ok(Token::VerbatimString(formatter, text)))
+    }
+
+    fn scan_map(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.scan_token('%')?;
+        let count_result = self.get_integer()?.map(|count| count * 2);
+        self.skip_line()?;
+
+        let mut map = Vec::new();
+
+        match self.get_collections(count_result, |token| {
+            map.push(token);
+        }) {
+            None => None,
+            Some(Ok(count)) if count >= 0 => Some(Ok(Token::Map(Some(map)))),
+            Some(Ok(_)) => Some(Ok(Token::Map(None))),
+            Some(Err(e)) => Some(Err(e)),
+        }
     }
 }
 
@@ -319,6 +341,7 @@ impl<'a> Iterator for Lexer<'a> {
             (_, '(') => self.scan_big_number(),
             (_, '!') => self.scan_big_error(),
             (_, '=') => self.scan_verbatim_string(),
+            (_, '%') => self.scan_map(),
             _ => {
                 todo!()
             }
@@ -520,6 +543,34 @@ mod tests {
         assert_eq!(
             lexer.next().unwrap(),
             Ok(Token::VerbatimString("txt", "Some string"))
+        );
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_set() {
+        let mut lexer = Lexer::new("~2\r\n+hello\r\n+world\r\n");
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Set(Some(vec![
+                Token::SimpleString("hello"),
+                Token::SimpleString("world"),
+            ])))
+        );
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_map() {
+        let mut lexer = Lexer::new("%2\r\n+first\r\n:1\r\n+second\r\n:2\r\n");
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Map(Some(vec![
+                Token::SimpleString("first"),
+                Token::Integer(1),
+                Token::SimpleString("second"),
+                Token::Integer(2),
+            ])))
         );
         assert_eq!(lexer.next(), None);
     }

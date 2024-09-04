@@ -18,6 +18,7 @@ enum Token<'a> {
     BigErr(&'a str),
     VerbatimString(&'a str, &'a str),
     Map(Option<Vec<Token<'a>>>),
+    Push(Option<Vec<Token<'a>>>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -307,6 +308,22 @@ impl<'a> Lexer<'a> {
             Some(Err(e)) => Some(Err(e)),
         }
     }
+
+    fn scan_push(&mut self) -> Option<ParseResult<Token<'a>>> {
+        self.scan_token('>')?;
+        let count_result = self.get_integer()?;
+        self.skip_line()?;
+
+        let mut push = Vec::new();
+        match self.get_collections(count_result, |token| {
+            push.push(token);
+        }) {
+            None => None,
+            Some(Ok(count)) if count >= 0 => Some(Ok(Token::Push(Some(push)))),
+            Some(Ok(_)) => Some(Ok(Token::Push(None))),
+            Some(Err(e)) => Some(Err(e)),
+        }
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -342,6 +359,7 @@ impl<'a> Iterator for Lexer<'a> {
             (_, '!') => self.scan_big_error(),
             (_, '=') => self.scan_verbatim_string(),
             (_, '%') => self.scan_map(),
+            (_, '>') => self.scan_push(),
             _ => {
                 todo!()
             }
@@ -566,6 +584,21 @@ mod tests {
         assert_eq!(
             lexer.next().unwrap(),
             Ok(Token::Map(Some(vec![
+                Token::SimpleString("first"),
+                Token::Integer(1),
+                Token::SimpleString("second"),
+                Token::Integer(2),
+            ])))
+        );
+        assert_eq!(lexer.next(), None);
+    }
+
+    #[test]
+    fn test_push() {
+        let mut lexer = Lexer::new(">4\r\n+first\r\n:1\r\n+second\r\n:2\r\n");
+        assert_eq!(
+            lexer.next().unwrap(),
+            Ok(Token::Push(Some(vec![
                 Token::SimpleString("first"),
                 Token::Integer(1),
                 Token::SimpleString("second"),
